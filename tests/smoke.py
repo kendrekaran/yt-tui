@@ -54,6 +54,16 @@ def test_parsing() -> None:
         author_color("bob", "c1") == author_color("bob", "c1"),
     )
 
+    from yt_tui.emoji_text import expand_emoji_text
+
+    print("\nemoji expansion")
+    expanded = expand_emoji_text(
+        "hi :rolling_on_the_floor_laughing: :fire: :face-red-heart-shape:"
+    )
+    check("unicode shortcodes become glyphs", "🤣" in expanded and "🔥" in expanded, expanded)
+    check("youtube custom faces become glyphs", "❤️" in expanded, expanded)
+    check("no raw shortcode left for known emoji", ":fire:" not in expanded, expanded)
+
 
 def sample_messages() -> list[ChatMessage]:
     return [
@@ -63,7 +73,7 @@ def sample_messages() -> list[ChatMessage]:
             author="normal_viewer",
             color=author_color("normal_viewer"),
             timestamp="05:04",
-            text="hello from the chat! [not markup] <ok>",
+            text="hello from the chat! 🤣🔥 [not markup] <ok>",
         ),
         ChatMessage(
             msg_id="2",

@@ -13,6 +13,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from .emoji_text import compose_chat_text
 from .utils import author_color
 
 MSG_TEXT = "textMessage"
@@ -77,7 +78,7 @@ def _to_message(item: Any) -> ChatMessage:
     name = getattr(author, "name", "") or "unknown"
     channel_id = getattr(author, "channelId", "") or ""
     kind = getattr(item, "type", MSG_TEXT) or MSG_TEXT
-    text = getattr(item, "message", "") or ""
+    text = compose_chat_text(item)
 
     if kind == MSG_STICKER and not text:
         text = "sent a Super Sticker"

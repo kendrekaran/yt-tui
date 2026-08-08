@@ -176,5 +176,7 @@ yt_tui/
   thread and would otherwise raise `signal only works in main thread` from the worker.
 - Chat scrollback is capped at 300 rows.
 - Super Stickers show the amount and a placeholder line, since images cannot render in a terminal.
-- Emoji in messages arrive as pytchat shortcodes, e.g. `:smile:`.
+- Emoji in messages are expanded to real glyphs (🤣🔥❤️). YouTube's custom
+  coloured faces map to the closest Unicode emoji; unknown custom channel
+  emoji show as a short `[name]` chip because terminals cannot draw their PNG.
 - A stream whose chat has ended reports `Ended` rather than an error.
