@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .utils import project_label, short_id, truncate
+from .hermes_status import HermesSnapshot, get_hermes_snapshot
 
 CURSOR_PROJECTS = Path.home() / ".cursor" / "projects"
 
@@ -411,6 +412,7 @@ class Snapshot:
     peers: list[DeviceGroup] = field(default_factory=list)
     cloud: list[AgentInfo] = field(default_factory=list)
     shells: list[ShellInfo] = field(default_factory=list)
+    hermes: HermesSnapshot = field(default_factory=HermesSnapshot)
     sync_path: str = ""
     cloud_note: str = ""
 
@@ -458,6 +460,11 @@ def build_snapshot(include_cloud: bool = True) -> Snapshot:
             snapshot.cloud, snapshot.cloud_note = cloud_agents.get_cloud_agents()
         except Exception:
             snapshot.cloud, snapshot.cloud_note = [], "unavailable"
+
+    try:
+        snapshot.hermes = get_hermes_snapshot()
+    except Exception:
+        snapshot.hermes = HermesSnapshot(note="unavailable")
 
     return snapshot
 

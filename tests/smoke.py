@@ -163,6 +163,7 @@ async def test_app() -> None:
         check("section OTHER DEVICES", "OTHER DEVICES" in visible)
         check("section CLOUD", "CLOUD" in visible)
         check("section SHELLS", "SHELLS" in visible)
+        check("section HERMES", "HERMES" in visible)
         # Running agents use a green ● plus a bold title; footer shows "N run".
         check(
             "this agent shows as running",

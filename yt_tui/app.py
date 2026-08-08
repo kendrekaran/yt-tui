@@ -29,6 +29,7 @@ from .cursor_status import (
     Snapshot,
     build_snapshot,
 )
+from .hermes_status import when_label
 from .utils import humanize_age, parse_video_id, short_id, truncate
 
 MAX_CHAT_ROWS = 300
@@ -400,6 +401,14 @@ class YtTuiApp(App[None]):
         margin: 0;
     }
 
+    .hermes-line {
+        width: 1fr;
+        height: auto;
+        background: transparent;
+        padding: 0;
+        margin: 0;
+    }
+
     .empty-row {
         width: 1fr;
         height: 1;
@@ -732,6 +741,76 @@ class YtTuiApp(App[None]):
         else:
             widgets.append(EmptyRow("—"))
 
+        widgets.append(SectionLabel("HERMES"))
+        hermes = snapshot.hermes
+        if not hermes.available:
+            widgets.append(EmptyRow(hermes.note or "—"))
+        else:
+            gw = "● gateway" if hermes.gateway_running else "○ gateway off"
+            plats = " · ".join(hermes.platforms[:3]) if hermes.platforms else "no channels"
+            agents = (
+                f" · {hermes.active_agents} active"
+                if hermes.active_agents
+                else ""
+            )
+            tick = " · ticking" if hermes.ticking else ""
+            color = "#2ea043" if hermes.gateway_running else DIM
+            widgets.append(
+                Static(
+                    f"[{color}]{gw}[/][{DIM}] · {escape(plats)}{agents}{tick}[/]",
+                    classes="hermes-line",
+                    markup=True,
+                )
+            )
+
+            running = hermes.running_jobs
+            if running:
+                for job in running[:3]:
+                    title = escape(truncate(job.name, max(12, width - 12)))
+                    widgets.append(
+                        Static(
+                            f"[b #2ea043]\u25cf[/] [#e4e4e4]{title}[/] "
+                            f"[{CURSOR_ACCENT}]running[/]",
+                            classes="hermes-line",
+                            markup=True,
+                        )
+                    )
+            elif hermes.note and hermes.active_agents:
+                widgets.append(
+                    Static(
+                        f"[{CURSOR_ACCENT}]\u25cf[/] [{DIM}]{escape(hermes.note)}[/]",
+                        classes="hermes-line",
+                        markup=True,
+                    )
+                )
+
+            # Next up
+            shown = 0
+            for job in hermes.next_jobs:
+                if job.running:
+                    continue
+                if shown >= 4:
+                    break
+                when = when_label(job.next_run, now)
+                title = escape(truncate(job.name, max(10, width - 18)))
+                last = ""
+                if job.last_status == "ok" and job.last_run:
+                    last = f" · \u2713 {humanize_age(job.last_run, now)}"
+                elif job.last_status and job.last_status != "ok":
+                    last = f" · ! {escape(truncate(job.last_status, 12))}"
+                widgets.append(
+                    Static(
+                        f"[{DIM}]next[/] [#c8c8c8]{title}[/] "
+                        f"[{CURSOR_MUTED}]{escape(when)}{last}[/]",
+                        classes="hermes-line",
+                        markup=True,
+                    )
+                )
+                shown += 1
+
+            if not running and shown == 0:
+                widgets.append(EmptyRow(hermes.note or "no jobs"))
+
         widgets.append(SectionLabel("SHELLS"))
         if snapshot.shells:
             widgets.extend(ShellRow(s, now, width) for s in snapshot.shells[:3])
@@ -769,6 +848,22 @@ class YtTuiApp(App[None]):
             tuple(agent_key(a) for a in snapshot.cloud),
             tuple((s.command, s.status, round(s.updated)) for s in snapshot.shells),
             snapshot.cloud_note,
+            (
+                snapshot.hermes.gateway_running,
+                snapshot.hermes.active_agents,
+                snapshot.hermes.ticking,
+                snapshot.hermes.note,
+                tuple(
+                    (
+                        j.job_id,
+                        j.state,
+                        j.last_status,
+                        round(j.next_run),
+                        round(j.last_run),
+                    )
+                    for j in snapshot.hermes.jobs
+                ),
+            ),
         )
 
     # -------------------------------------------------------------- exit
