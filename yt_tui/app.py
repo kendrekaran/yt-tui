@@ -27,7 +27,6 @@ from .cursor_status import (
     AgentInfo,
     ShellInfo,
     Snapshot,
-    TodoItem,
     build_snapshot,
 )
 from .utils import humanize_age, parse_video_id, short_id, truncate
