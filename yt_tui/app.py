@@ -746,50 +746,77 @@ class YtTuiApp(App[None]):
         if not hermes.available:
             widgets.append(EmptyRow(hermes.note or "—"))
         else:
+            live_n = len(hermes.running_chats)
             gw = "● gateway" if hermes.gateway_running else "○ gateway off"
             plats = " · ".join(hermes.platforms[:3]) if hermes.platforms else "no channels"
-            agents = (
-                f" · {hermes.active_agents} active"
-                if hermes.active_agents
-                else ""
-            )
             tick = " · ticking" if hermes.ticking else ""
+            live = f" · {live_n} live" if live_n else ""
             color = "#2ea043" if hermes.gateway_running else DIM
             widgets.append(
                 Static(
-                    f"[{color}]{gw}[/][{DIM}] · {escape(plats)}{agents}{tick}[/]",
+                    f"[{color}]{gw}[/][{DIM}] · {escape(plats)}{live}{tick}[/]",
                     classes="hermes-line",
                     markup=True,
                 )
             )
 
-            running = hermes.running_jobs
-            if running:
-                for job in running[:3]:
-                    title = escape(truncate(job.name, max(12, width - 12)))
+            # Live chats (Telegram / WhatsApp / CLI) — this is the realtime feed.
+            chat_rows = 0
+            for chat in hermes.chats[:5]:
+                chat_rows += 1
+                if chat.status == "running":
+                    pill = "[b #2ea043]\u25cf[/]"
+                    title = escape(truncate(chat.task, max(12, width - 10)))
                     widgets.append(
                         Static(
-                            f"[b #2ea043]\u25cf[/] [#e4e4e4]{title}[/] "
-                            f"[{CURSOR_ACCENT}]running[/]",
+                            f"{pill} [b #e4e4e4]{title}[/]",
                             classes="hermes-line",
                             markup=True,
                         )
                     )
-            elif hermes.note and hermes.active_agents:
+                    meta_bits = [chat.platform]
+                    if chat.user:
+                        meta_bits.append(chat.user.split()[0])
+                    if chat.detail:
+                        meta_bits.append(chat.detail)
+                    if chat.tools:
+                        meta_bits.append(", ".join(chat.tools[:3]))
+                    widgets.append(
+                        Static(
+                            f"  [{CURSOR_ACCENT}]{escape(truncate(' \u00b7 '.join(meta_bits), width - 2))}[/]",
+                            classes="hermes-line",
+                            markup=True,
+                        )
+                    )
+                else:
+                    pill = f"[{DIM}]\u2713[/]"
+                    title = escape(truncate(chat.task or chat.title, max(12, width - 14)))
+                    age = humanize_age(chat.updated, now)
+                    widgets.append(
+                        Static(
+                            f"{pill} [{CURSOR_MUTED}]{escape(chat.platform)}[/] "
+                            f"[#c8c8c8]{title}[/] [{DIM}]{age}[/]",
+                            classes="hermes-line",
+                            markup=True,
+                        )
+                    )
+
+            for job in hermes.running_jobs[:2]:
+                title = escape(truncate(job.name, max(12, width - 12)))
                 widgets.append(
                     Static(
-                        f"[{CURSOR_ACCENT}]\u25cf[/] [{DIM}]{escape(hermes.note)}[/]",
+                        f"[b #2ea043]\u25cf[/] [#e4e4e4]cron {title}[/] "
+                        f"[{CURSOR_ACCENT}]running[/]",
                         classes="hermes-line",
                         markup=True,
                     )
                 )
 
-            # Next up
             shown = 0
             for job in hermes.next_jobs:
                 if job.running:
                     continue
-                if shown >= 4:
+                if shown >= 3:
                     break
                 when = when_label(job.next_run, now)
                 title = escape(truncate(job.name, max(10, width - 18)))
@@ -808,8 +835,8 @@ class YtTuiApp(App[None]):
                 )
                 shown += 1
 
-            if not running and shown == 0:
-                widgets.append(EmptyRow(hermes.note or "no jobs"))
+            if chat_rows == 0 and shown == 0 and not hermes.running_jobs:
+                widgets.append(EmptyRow(hermes.note or "idle"))
 
         widgets.append(SectionLabel("SHELLS"))
         if snapshot.shells:
@@ -862,6 +889,17 @@ class YtTuiApp(App[None]):
                         round(j.last_run),
                     )
                     for j in snapshot.hermes.jobs
+                ),
+                tuple(
+                    (
+                        c.session_id,
+                        c.status,
+                        c.task,
+                        c.detail,
+                        tuple(c.tools),
+                        round(c.updated),
+                    )
+                    for c in snapshot.hermes.chats
                 ),
             ),
         )
