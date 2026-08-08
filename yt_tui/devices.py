@@ -7,11 +7,13 @@ reads its peers' files back.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import socket
 import tempfile
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +30,43 @@ FALLBACK_DIR = Path.home() / ".yt-tui" / "devices"
 
 STALE_SECONDS = 15 * 60
 PUBLISH_INTERVAL = 5.0
+
+MACHINE_ID_PATH = Path.home() / ".yt-tui" / "machine-id"
+
+_machine_id: str | None = None
+
+
+def machine_id() -> str:
+    """A stable id for this Mac, independent of its hostname.
+
+    Filenames alone are not enough to recognise our own file: if the
+    hostname changes, the old file would otherwise show up as a peer.
+    """
+    global _machine_id
+    if _machine_id is not None:
+        return _machine_id
+
+    try:
+        if MACHINE_ID_PATH.is_file():
+            existing = MACHINE_ID_PATH.read_text(encoding="utf-8").strip()
+            if existing:
+                _machine_id = existing
+                return existing
+    except OSError:
+        pass
+
+    generated = uuid.uuid4().hex[:16]
+    try:
+        MACHINE_ID_PATH.parent.mkdir(parents=True, exist_ok=True)
+        MACHINE_ID_PATH.write_text(generated, encoding="utf-8")
+    except OSError:
+        # Cannot persist, so derive something stable for this session
+        # instead of a fresh random value on every call.
+        seed = f"{socket.gethostname()}:{Path.home()}".encode("utf-8", "replace")
+        generated = hashlib.md5(seed, usedforsecurity=False).hexdigest()[:16]
+
+    _machine_id = generated
+    return generated
 
 
 def device_name() -> str:
@@ -46,6 +85,18 @@ def device_name() -> str:
 def _safe_name(value: str) -> str:
     cleaned = "".join(c if (c.isalnum() or c in "-_") else "-" for c in value.strip())
     return cleaned.strip("-") or "mac"
+
+
+def _same_device(a: str, b: str) -> bool:
+    """Compare device labels ignoring case and hostname suffixes."""
+
+    def normalize(value: str) -> str:
+        text = _safe_name(str(value)).lower()
+        for suffix in ("-local", "-lan", "-home"):
+            text = text.removesuffix(suffix)
+        return text
+
+    return bool(a) and normalize(a) == normalize(b)
 
 
 def devices_dir() -> Path:
@@ -88,13 +139,15 @@ def publish(agents: list[AgentInfo] | None = None, shells: list[ShellInfo] | Non
     name = device_name()
     payload: dict[str, Any] = {
         "device": name,
+        "machine_id": machine_id(),
         "updated": time.time(),
-        "version": 1,
+        "version": 2,
         "agents": [a.to_dict() for a in agents],
         "shells": [s.to_dict() for s in shells],
     }
 
     path = target / f"{name}.json"
+    _remove_stale_self(target, path)
     try:
         # Atomic replace so a peer never reads a half-written file.
         with tempfile.NamedTemporaryFile(
@@ -106,6 +159,42 @@ def publish(agents: list[AgentInfo] | None = None, shells: list[ShellInfo] | Non
     except OSError:
         return None
     return path
+
+
+def _remove_stale_self(target: Path, current: Path) -> None:
+    """Delete files this machine wrote under a previous name.
+
+    Renaming a Mac (or a `.local` hostname sneaking in) would otherwise
+    leave an orphan file that the machine then lists as its own peer.
+    """
+    me = machine_id()
+    try:
+        candidates = list(target.glob("*.json"))
+    except OSError:
+        return
+
+    for path in candidates:
+        if path == current or path.name.startswith("."):
+            continue
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(raw, dict):
+            continue
+        recorded = raw.get("machine_id")
+        is_self = recorded == me or (
+            recorded is None
+            and (
+                _same_device(str(raw.get("device", "")), device_name())
+                or _same_device(path.stem, device_name())
+            )
+        )
+        if is_self:
+            try:
+                path.unlink()
+            except OSError:
+                pass
 
 
 def read_peers(stale_seconds: float = STALE_SECONDS) -> list[DeviceGroup]:
@@ -120,6 +209,7 @@ def read_peers(stale_seconds: float = STALE_SECONDS) -> list[DeviceGroup]:
             return []
 
     me = device_name()
+    my_id = machine_id()
     now = time.time()
     groups: list[DeviceGroup] = []
 
@@ -139,7 +229,11 @@ def read_peers(stale_seconds: float = STALE_SECONDS) -> list[DeviceGroup]:
             continue
 
         name = str(raw.get("device", path.stem)) or path.stem
-        if name == me:
+        if raw.get("machine_id") == my_id:
+            continue
+        # Older files predate machine ids, so also match on name, and be
+        # lenient about case and a trailing '.local' from the hostname.
+        if _same_device(name, me) or _same_device(path.stem, me):
             continue
 
         updated = float(raw.get("updated", 0.0) or 0.0)
