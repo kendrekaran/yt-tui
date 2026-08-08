@@ -66,9 +66,13 @@ def main(argv: list[str] | None = None) -> int:
         if target is None:
             print("Could not create the devices folder.", file=sys.stderr)
             return 1
+        from . import gist_sync
+
+        gist = gist_sync.ensure_gist()
         path = devices.publish()
         print(f"devices folder: {target}")
         print(f"published     : {path if path else 'failed'}")
+        print(f"gist          : {gist if gist else 'failed (is `gh` logged in?)'}")
         print()
         print(devices.status_report())
         return 0

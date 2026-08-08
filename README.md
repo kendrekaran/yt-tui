@@ -77,53 +77,27 @@ was touched in the last 15 minutes; otherwise it is done or idle.
 
 ## Cross-device sync (second MacBook)
 
-Local IDE chats do not sync through your Cursor account, so yt-tui uses a shared folder instead.
-Each machine writes `<device>.json` and reads its peers' files.
+Local IDE chats do not sync through your Cursor account. yt-tui publishes each
+Mac's status two ways:
 
-Resolution order for the folder:
+1. **GitHub gist (reliable)** — a private gist shared by both Macs via `gh`
+2. **iCloud folder (best-effort)** — `~/Library/Mobile Documents/.../yt-tui-devices`
 
-1. `YT_TUI_DEVICES_DIR` if set
-2. `~/Library/Mobile Documents/com~apple~CloudDocs/yt-tui-devices` (iCloud Drive)
-3. `~/.yt-tui/devices`
+iCloud alone often fails to deliver files between Macs. The gist is what makes
+OTHER DEVICES actually show up.
 
-Set up **on both Macs**:
-
-```bash
-yt-tui --devices init     # create the folder and publish once
-yt-tui --devices          # show sync status and detected peers
-```
-
-The TUI publishes this machine's activity every 5s while it runs. If you want the other Mac to
-appear without keeping the TUI open there, run a publisher on it:
+Both Macs need the same GitHub account logged into the `gh` CLI:
 
 ```bash
-yt-tui --sync             # publish once
-yt-tui --sync --loop      # keep publishing (this is what the other Mac should run)
+gh auth login          # once per Mac, if needed
+cd ~/yt-tui && git pull && uv sync
+uv run yt-tui --devices init
+./scripts/install-launchagent.sh
+uv run yt-tui --devices    # should list the other Mac under peers
 ```
 
-Peer files older than 15 minutes are ignored, and a machine never lists itself.
-
-### Publish automatically on login
-
-Rather than remembering to start `--sync --loop`, install a LaunchAgent on each Mac:
-
-```bash
-./scripts/install-launchagent.sh          # every 5s (pass a number to change it)
-tail -f ~/Library/Logs/yt-tui-sync.log    # watch it
-./scripts/uninstall-launchagent.sh        # stop and remove
-```
-
-It resolves `uv` and the project path at install time, so the same script works on any Mac, and
-it restarts itself on login. In this mode the publisher logs only state changes, so the log stays
-a few lines long instead of growing all day.
-
-```bash
-export YT_TUI_DEVICE_NAME="studio"   # label this machine (defaults to hostname)
-export YT_TUI_DEVICES_DIR="~/Dropbox/yt-tui-devices"   # use something other than iCloud
-```
-
-Useful flags: `--no-publish` (read peers but stay invisible), `--interval N` (seconds between
-`--sync --loop` publishes).
+The shared gist id is stored in `device-sync.gist` in this repo (created on first
+init). After `git pull`, both Macs use the same gist automatically.
 
 ## Cloud agents (optional)
 

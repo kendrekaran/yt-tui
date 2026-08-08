@@ -17,6 +17,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from . import gist_sync
 from .cursor_status import AgentInfo, DeviceGroup, ShellInfo, local_agents, local_shells
 
 ICLOUD_DIR = (
@@ -125,11 +126,7 @@ def ensure_dir() -> Path | None:
 
 
 def publish(agents: list[AgentInfo] | None = None, shells: list[ShellInfo] | None = None) -> Path | None:
-    """Write this machine's activity as `<device>.json`. Never raises."""
-    target = ensure_dir()
-    if target is None:
-        return None
-
+    """Write this machine's activity locally and to the shared GitHub gist."""
     try:
         agents = local_agents() if agents is None else agents
         shells = local_shells() if shells is None else shells
@@ -146,19 +143,84 @@ def publish(agents: list[AgentInfo] | None = None, shells: list[ShellInfo] | Non
         "shells": [s.to_dict() for s in shells],
     }
 
-    path = target / f"{name}.json"
-    _remove_stale_self(target, path)
+    path: Path | None = None
+    target = ensure_dir()
+    if target is not None:
+        path = target / f"{name}.json"
+        _remove_stale_self(target, path)
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w",
+                encoding="utf-8",
+                dir=str(target),
+                prefix=".tmp-",
+                suffix=".json",
+                delete=False,
+            ) as handle:
+                json.dump(payload, handle, ensure_ascii=False)
+                tmp_path = handle.name
+            os.replace(tmp_path, path)
+        except OSError:
+            path = None
+
+    # Gist is the reliable cross-Mac channel; local folder is a bonus.
+    gist_ok = False
     try:
-        # Atomic replace so a peer never reads a half-written file.
-        with tempfile.NamedTemporaryFile(
-            "w", encoding="utf-8", dir=str(target), prefix=".tmp-", suffix=".json", delete=False
-        ) as handle:
-            json.dump(payload, handle, ensure_ascii=False)
-            tmp_path = handle.name
-        os.replace(tmp_path, path)
-    except OSError:
+        gist_ok = gist_sync.publish_to_gist(f"{name}.json", payload)
+    except Exception:
+        gist_ok = False
+
+    if path is not None:
+        return path
+    if gist_ok:
+        return Path(f"gist:{name}.json")
+    return None
+
+
+def _group_from_payload(
+    raw: dict[str, Any],
+    fallback_name: str,
+    stale_seconds: float = STALE_SECONDS,
+) -> DeviceGroup | None:
+    """Turn one device JSON payload into a DeviceGroup, or None if it is us/stale."""
+    me = device_name()
+    my_id = machine_id()
+    now = time.time()
+
+    name = str(raw.get("device", fallback_name)) or fallback_name
+    if raw.get("machine_id") == my_id:
         return None
-    return path
+    if _same_device(name, me) or _same_device(fallback_name, me):
+        return None
+
+    updated = float(raw.get("updated", 0.0) or 0.0)
+    if not updated or now - updated > stale_seconds:
+        return None
+
+    agents: list[AgentInfo] = []
+    for item in raw.get("agents", []) or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            info = AgentInfo.from_dict(item)
+        except Exception:
+            continue
+        info.device = name
+        info.source = "device"
+        agents.append(info)
+
+    shells: list[ShellInfo] = []
+    for item in raw.get("shells", []) or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            shell = ShellInfo.from_dict(item)
+        except Exception:
+            continue
+        shell.device = name
+        shells.append(shell)
+
+    return DeviceGroup(name=name, agents=agents, shells=shells, updated=updated)
 
 
 def _remove_stale_self(target: Path, current: Path) -> None:
@@ -198,80 +260,43 @@ def _remove_stale_self(target: Path, current: Path) -> None:
 
 
 def read_peers(stale_seconds: float = STALE_SECONDS) -> list[DeviceGroup]:
-    """Load peer device files, skipping self and stale entries."""
+    """Load peer devices from the local folder and the shared GitHub gist."""
+    by_name: dict[str, DeviceGroup] = {}
+
+    def _add(group: DeviceGroup | None) -> None:
+        if group is None:
+            return
+        existing = by_name.get(group.name)
+        if existing is None or group.updated >= existing.updated:
+            by_name[group.name] = group
+
+    # Local / iCloud folder.
     target = devices_dir()
-    if not target.is_dir():
-        # publish() falls back when the preferred folder is unwritable, so
-        # look there too rather than reporting no peers at all.
-        if FALLBACK_DIR.is_dir():
-            target = FALLBACK_DIR
-        else:
-            return []
-
-    me = device_name()
-    my_id = machine_id()
-    now = time.time()
-    groups: list[DeviceGroup] = []
-
-    try:
-        files = sorted(target.glob("*.json"))
-    except OSError:
-        return []
-
-    for path in files:
-        if path.name.startswith("."):
-            continue
+    if not target.is_dir() and FALLBACK_DIR.is_dir():
+        target = FALLBACK_DIR
+    if target.is_dir():
         try:
-            raw = json.loads(path.read_text(encoding="utf-8", errors="replace"))
-        except (OSError, ValueError):
-            continue
-        if not isinstance(raw, dict):
-            continue
-
-        name = str(raw.get("device", path.stem)) or path.stem
-        if raw.get("machine_id") == my_id:
-            continue
-        # Older files predate machine ids, so also match on name, and be
-        # lenient about case and a trailing '.local' from the hostname.
-        if _same_device(name, me) or _same_device(path.stem, me):
-            continue
-
-        updated = float(raw.get("updated", 0.0) or 0.0)
-        if not updated:
-            try:
-                updated = path.stat().st_mtime
-            except OSError:
-                updated = 0.0
-        if now - updated > stale_seconds:
-            continue
-
-        agents: list[AgentInfo] = []
-        for item in raw.get("agents", []) or []:
-            if not isinstance(item, dict):
+            files = sorted(target.glob("*.json"))
+        except OSError:
+            files = []
+        for path in files:
+            if path.name.startswith("."):
                 continue
             try:
-                info = AgentInfo.from_dict(item)
-            except Exception:
+                raw = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+            except (OSError, ValueError):
                 continue
-            info.device = name
-            info.source = "device"
-            agents.append(info)
+            if isinstance(raw, dict):
+                _add(_group_from_payload(raw, path.stem, stale_seconds))
 
-        shells: list[ShellInfo] = []
-        for item in raw.get("shells", []) or []:
-            if not isinstance(item, dict):
-                continue
-            try:
-                shell = ShellInfo.from_dict(item)
-            except Exception:
-                continue
-            shell.device = name
-            shells.append(shell)
+    # GitHub gist (works even when iCloud does not sync).
+    try:
+        for filename, raw in gist_sync.read_gist_files().items():
+            _add(_group_from_payload(raw, Path(filename).stem, stale_seconds))
+    except Exception:
+        pass
 
-        groups.append(
-            DeviceGroup(name=name, agents=agents, shells=shells, updated=updated)
-        )
-
+    groups = list(by_name.values())
     groups.sort(key=lambda g: -g.updated)
     return groups
 
@@ -281,8 +306,10 @@ def status_report() -> str:
     target = devices_dir()
     lines = [
         f"device name : {device_name()}",
+        f"machine id  : {machine_id()}",
         f"sync folder : {target}",
         f"exists      : {'yes' if target.is_dir() else 'no (run: yt-tui --devices init)'}",
+        gist_sync.gist_status_line(),
     ]
 
     if target.is_dir():
@@ -290,7 +317,13 @@ def status_report() -> str:
             files = sorted(p.name for p in target.glob("*.json") if not p.name.startswith("."))
         except OSError:
             files = []
-        lines.append(f"files       : {', '.join(files) if files else '(none)'}")
+        lines.append(f"local files : {', '.join(files) if files else '(none)'}")
+
+    try:
+        gist_files = sorted(gist_sync.read_gist_files())
+    except Exception:
+        gist_files = []
+    lines.append(f"gist files  : {', '.join(gist_files) if gist_files else '(none)'}")
 
     peers = read_peers()
     if peers:
@@ -306,6 +339,8 @@ def status_report() -> str:
             )
     else:
         lines.append("")
-        lines.append("peers: none (fresh peer files only, < 15 min old)")
+        lines.append("peers: none")
+        lines.append("  tip: both Macs need `gh auth login` (same GitHub account),")
+        lines.append("       then `yt-tui --devices init` and a running publisher.")
 
     return "\n".join(lines)
