@@ -32,8 +32,8 @@ from .cursor_status import (
 from .utils import humanize_age, parse_video_id, short_id, truncate
 
 MAX_CHAT_ROWS = 300
-CURSOR_REFRESH_SECONDS = 1.0
-PUBLISH_EVERY_SECONDS = 2.0
+CURSOR_REFRESH_SECONDS = 0.4
+PUBLISH_EVERY_SECONDS = 0.5
 
 # Muted grays and the YouTube/Cursor accents used in inline markup.
 DIM = "#6f6f6f"
@@ -466,6 +466,7 @@ class YtTuiApp(App[None]):
         self.set_interval(0.1, self._drain_events)
         self.set_interval(CURSOR_REFRESH_SECONDS, self.action_refresh_cursor)
         self.action_refresh_cursor()
+        self._start_realtime()
 
         if self.initial_target:
             self.connect_to(self.initial_target)
@@ -473,6 +474,23 @@ class YtTuiApp(App[None]):
         else:
             self.query_one("#url-input", Input).focus()
             self._notice("Paste a YouTube live URL above and press Enter.")
+
+    def _start_realtime(self) -> None:
+        """Subscribe to MQTT peer updates and refresh the right pane immediately."""
+        if not self.publish_enabled:
+            return
+        try:
+            from . import devices
+
+            bus = devices._realtime()
+
+            def _kick() -> None:
+                self._last_signature = ()
+                self.action_refresh_cursor()
+
+            bus.on_peer_update(lambda: self.call_from_thread(_kick))
+        except Exception:
+            pass
 
     # -------------------------------------------------------------- chat
 

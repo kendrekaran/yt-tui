@@ -30,16 +30,31 @@ ICLOUD_DIR = (
 FALLBACK_DIR = Path.home() / ".yt-tui" / "devices"
 
 STALE_SECONDS = 15 * 60
-PUBLISH_INTERVAL = 2.0
-# Push immediately when agent state changes; otherwise heartbeat so peers
-# do not look stale while nothing is happening.
-PUBLISH_HEARTBEAT_SECONDS = 8.0
+PUBLISH_INTERVAL = 0.5
+# MQTT heartbeat keeps the other Mac's "age" fresh even when idle.
+MQTT_HEARTBEAT_SECONDS = 2.0
+# Gist is persistence only — not the live path.
+GIST_HEARTBEAT_SECONDS = 30.0
 
 MACHINE_ID_PATH = Path.home() / ".yt-tui" / "machine-id"
 
 _machine_id: str | None = None
 _last_publish_fingerprint: str | None = None
 _last_gist_publish = 0.0
+_last_mqtt_publish = 0.0
+_bus = None
+
+
+def _realtime():
+    """Lazy MQTT bus keyed by the shared gist id."""
+    global _bus
+    from . import gist_sync, realtime
+
+    channel = gist_sync.gist_id() or gist_sync.ensure_gist() or "yt-tui-local"
+    if _bus is None or getattr(_bus, "channel", None) != channel:
+        _bus = realtime.get_bus(channel)
+        _bus.set_self(machine_id())
+    return _bus
 
 
 def machine_id() -> str:
@@ -172,8 +187,8 @@ def _payload_fingerprint(payload: dict[str, Any]) -> str:
 
 
 def publish(agents: list[AgentInfo] | None = None, shells: list[ShellInfo] | None = None) -> Path | None:
-    """Write this machine's activity locally and to the shared GitHub gist."""
-    global _last_publish_fingerprint, _last_gist_publish
+    """Publish locally, over MQTT (realtime), and occasionally to the gist."""
+    global _last_publish_fingerprint, _last_gist_publish, _last_mqtt_publish
 
     try:
         agents = local_agents() if agents is None else agents
@@ -182,11 +197,12 @@ def publish(agents: list[AgentInfo] | None = None, shells: list[ShellInfo] | Non
         agents, shells = agents or [], shells or []
 
     name = device_name()
+    mid = machine_id()
     payload: dict[str, Any] = {
         "device": name,
-        "machine_id": machine_id(),
+        "machine_id": mid,
         "updated": time.time(),
-        "version": 2,
+        "version": 3,
         "agents": [a.to_dict() for a in agents],
         "shells": [s.to_dict() for s in shells],
     }
@@ -214,21 +230,36 @@ def publish(agents: list[AgentInfo] | None = None, shells: list[ShellInfo] | Non
     fingerprint = _payload_fingerprint(payload)
     now = time.time()
     changed = fingerprint != _last_publish_fingerprint
-    due = (now - _last_gist_publish) >= PUBLISH_HEARTBEAT_SECONDS
+    mqtt_due = (now - _last_mqtt_publish) >= MQTT_HEARTBEAT_SECONDS
+    gist_due = (now - _last_gist_publish) >= GIST_HEARTBEAT_SECONDS
+
+    mqtt_ok = False
+    if changed or mqtt_due:
+        try:
+            bus = _realtime()
+            mqtt_ok = bus.publish(mid, payload)
+        except Exception:
+            mqtt_ok = False
+        if mqtt_ok or changed:
+            # Advance fingerprint on change even if mqtt briefly fails,
+            # so we keep retrying via heartbeat.
+            if changed:
+                _last_publish_fingerprint = fingerprint
+            if mqtt_ok:
+                _last_mqtt_publish = now
+
     gist_ok = False
-    if changed or due:
+    # Gist is backup only — never on the realtime path.
+    if gist_due:
         try:
             gist_ok = gist_sync.publish_to_gist(f"{name}.json", payload)
         except Exception:
             gist_ok = False
         if gist_ok:
-            _last_publish_fingerprint = fingerprint
             _last_gist_publish = now
 
-    if path is not None:
-        return path
-    if gist_ok or (_last_gist_publish and not changed and not due):
-        return Path(f"gist:{name}.json")
+    if path is not None or mqtt_ok or gist_ok:
+        return path or Path(f"mqtt:{name}.json")
     return None
 
 
@@ -315,7 +346,7 @@ def _remove_stale_self(target: Path, current: Path) -> None:
 
 
 def read_peers(stale_seconds: float = STALE_SECONDS) -> list[DeviceGroup]:
-    """Load peer devices from the local folder and the shared GitHub gist."""
+    """Merge realtime MQTT peers with optional gist/local fallbacks."""
     by_name: dict[str, DeviceGroup] = {}
 
     def _add(group: DeviceGroup | None) -> None:
@@ -325,7 +356,16 @@ def read_peers(stale_seconds: float = STALE_SECONDS) -> list[DeviceGroup]:
         if existing is None or group.updated >= existing.updated:
             by_name[group.name] = group
 
-    # Local / iCloud folder.
+    # 1) Realtime MQTT cache — instant.
+    try:
+        bus = _realtime()
+        for raw in bus.peer_payloads():
+            name = str(raw.get("device") or "peer")
+            _add(_group_from_payload(raw, name, stale_seconds))
+    except Exception:
+        pass
+
+    # 2) Local folder (almost never has the other Mac, but cheap).
     target = devices_dir()
     if not target.is_dir() and FALLBACK_DIR.is_dir():
         target = FALLBACK_DIR
@@ -344,12 +384,13 @@ def read_peers(stale_seconds: float = STALE_SECONDS) -> list[DeviceGroup]:
             if isinstance(raw, dict):
                 _add(_group_from_payload(raw, path.stem, stale_seconds))
 
-    # GitHub gist (works even when iCloud does not sync).
-    try:
-        for filename, raw in gist_sync.read_gist_files().items():
-            _add(_group_from_payload(raw, Path(filename).stem, stale_seconds))
-    except Exception:
-        pass
+    # 3) Gist checkout — only if MQTT has nothing yet (cold start).
+    if not by_name:
+        try:
+            for filename, raw in gist_sync.read_gist_files().items():
+                _add(_group_from_payload(raw, Path(filename).stem, stale_seconds))
+        except Exception:
+            pass
 
     groups = list(by_name.values())
     groups.sort(key=lambda g: -g.updated)
@@ -366,6 +407,10 @@ def status_report() -> str:
         f"exists      : {'yes' if target.is_dir() else 'no (run: yt-tui --devices init)'}",
         gist_sync.gist_status_line(),
     ]
+    try:
+        lines.append(_realtime().status_line())
+    except Exception as exc:
+        lines.append(f"realtime   : error ({exc})")
 
     if target.is_dir():
         try:
@@ -373,12 +418,6 @@ def status_report() -> str:
         except OSError:
             files = []
         lines.append(f"local files : {', '.join(files) if files else '(none)'}")
-
-    try:
-        gist_files = sorted(gist_sync.read_gist_files())
-    except Exception:
-        gist_files = []
-    lines.append(f"gist files  : {', '.join(gist_files) if gist_files else '(none)'}")
 
     peers = read_peers()
     if peers:
@@ -395,7 +434,7 @@ def status_report() -> str:
     else:
         lines.append("")
         lines.append("peers: none")
-        lines.append("  tip: both Macs need `gh auth login` (same GitHub account),")
-        lines.append("       then `yt-tui --devices init` and a running publisher.")
+        lines.append("  tip: both Macs need the publisher running")
+        lines.append("       (TUI open or ./scripts/install-launchagent.sh)")
 
     return "\n".join(lines)

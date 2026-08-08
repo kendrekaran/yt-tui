@@ -39,8 +39,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--interval",
         type=float,
-        default=3.0,
-        help="seconds between --sync --loop publishes (default: 3)",
+        default=0.5,
+        help="seconds between --sync --loop publishes (default: 0.5)",
     )
     parser.add_argument(
         "--no-publish",
@@ -87,10 +87,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"published: {path if path else 'failed'}")
             return 0 if path else 1
 
-        interval = max(1.0, args.interval)
+        interval = max(0.25, args.interval)
         print(
             f"publishing as '{devices.device_name()}' every {interval:g}s "
-            f"to {devices.devices_dir()}"
+            f"(mqtt realtime + gist backup)"
         )
         print("press ctrl-c to stop")
         previous_ok: bool | None = None

@@ -77,27 +77,28 @@ was touched in the last 15 minutes; otherwise it is done or idle.
 
 ## Cross-device sync (second MacBook)
 
-Local IDE chats do not sync through your Cursor account. yt-tui publishes each
-Mac's status two ways:
+Peer updates are **realtime over MQTT** (default broker: `broker.hivemq.com`).
+When an agent changes on one Mac, the other Mac's OTHER DEVICES pane updates
+within about half a second. A private GitHub gist is only a slow backup every
+~30s so peers can catch up after being offline.
 
-1. **GitHub gist (reliable)** — a private gist shared by both Macs via `gh`
-2. **iCloud folder (best-effort)** — `~/Library/Mobile Documents/.../yt-tui-devices`
-
-iCloud alone often fails to deliver files between Macs. The gist is what makes
-OTHER DEVICES actually show up.
-
-Both Macs need the same GitHub account logged into the `gh` CLI:
+Both Macs need the publisher running (TUI open, or the LaunchAgent):
 
 ```bash
 gh auth login          # once per Mac, if needed
 cd ~/yt-tui && git pull && uv sync
 uv run yt-tui --devices init
 ./scripts/install-launchagent.sh
-uv run yt-tui --devices    # should list the other Mac under peers
+uv run yt-tui --devices    # should show realtime: mqtt live
 ```
 
-The shared gist id is stored in `device-sync.gist` in this repo (created on first
-init). After `git pull`, both Macs use the same gist automatically.
+Optional overrides:
+
+```bash
+export YT_TUI_MQTT_HOST=broker.emqx.io
+export YT_TUI_MQTT_PORT=1883
+export YT_TUI_GIST_ID=...   # normally from device-sync.gist
+```
 
 ## Cloud agents (optional)
 
