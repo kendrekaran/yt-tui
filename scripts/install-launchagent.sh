@@ -10,7 +10,7 @@
 set -uo pipefail
 
 LABEL="com.yt-tui.sync"
-INTERVAL="${1:-2}"
+INTERVAL="${1:-3}"
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"

@@ -686,12 +686,15 @@ class YtTuiApp(App[None]):
         widgets.append(SectionLabel("OTHER DEVICES"))
         if snapshot.peers:
             for group in snapshot.peers:
+                age = humanize_age(group.updated, now)
+                stale = (now - group.updated) > 60
+                label = (
+                    f"[{DIM}]{escape(group.name)} · {age}[/]"
+                    if not stale
+                    else f"[#c9a227]{escape(group.name)} · {age} (stale)[/]"
+                )
                 widgets.append(
-                    Static(
-                        f"[{CURSOR_MUTED}]{escape(group.name)}[/]",
-                        classes="peer-label",
-                        markup=True,
-                    )
+                    Static(label, classes="peer-label", markup=True)
                 )
                 peer_agents = _sorted(group.agents, 4)
                 if peer_agents:
