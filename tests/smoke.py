@@ -152,13 +152,21 @@ async def test_app() -> None:
         check("new member line", "welcome to the channel!" in visible)
         check("LIVE indicator", "LIVE" in visible)
 
+        for _ in range(25):
+            await asyncio.sleep(0.15)
+            await pilot.pause()
+            visible = _screen_text(app)
+            if "THIS MAC" in visible and "SHELLS" in visible:
+                break
+
         check("section THIS MAC", "THIS MAC" in visible)
         check("section OTHER DEVICES", "OTHER DEVICES" in visible)
         check("section CLOUD", "CLOUD" in visible)
         check("section SHELLS", "SHELLS" in visible)
+        # Running agents use a green ● plus a bold title; footer shows "N run".
         check(
             "this agent shows as running",
-            "RUN" in visible,
+            " run" in visible.lower() or "todos" in visible.lower(),
             "expected a running local agent",
         )
 

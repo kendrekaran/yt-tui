@@ -231,10 +231,12 @@ def summarize_task(text: str, limit: int = 150) -> str:
     Prompts often open with a short title line, so keep pulling lines in
     until there is enough to read.
     """
-    lines = [line.strip() for line in (text or "").splitlines()]
+    cleaned = re.sub(r"!\[[^\]]*\]\([^)]*\]\)", " ", text or "")
+    cleaned = re.sub(r"\[[^\]]*Image[^\]]*\]", " ", cleaned, flags=re.IGNORECASE)
+    lines = [line.strip() for line in cleaned.splitlines()]
     lines = [line for line in lines if line and not line.startswith("<")]
     if not lines:
-        return truncate(text, limit)
+        return truncate(cleaned, limit)
 
     summary = lines[0]
     index = 1

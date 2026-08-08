@@ -28,10 +28,9 @@ from .cursor_status import (
     ShellInfo,
     Snapshot,
     TodoItem,
-    agent_handle,
     build_snapshot,
 )
-from .utils import humanize_age, parse_video_id, truncate
+from .utils import humanize_age, parse_video_id, short_id, truncate
 
 MAX_CHAT_ROWS = 300
 CURSOR_REFRESH_SECONDS = 1.5
@@ -96,67 +95,64 @@ class ChatRow(Static):
 
 
 class AgentCard(Static):
-    """Composer-style card for one agent."""
+    """One agent row. Done = single line. Running = title + live detail."""
 
-    def __init__(self, agent: AgentInfo, now: float, width: int = 44) -> None:
-        classes = f"agent-card agent-{agent.status}"
+    def __init__(
+        self,
+        agent: AgentInfo,
+        now: float,
+        width: int = 44,
+        *,
+        show_device: bool = False,
+    ) -> None:
+        classes = f"agent-row agent-{agent.status}"
         self.card_width = max(20, width)
+        self.show_device = show_device
         super().__init__(self._build(agent, now), classes=classes, markup=True)
 
     @staticmethod
     def _pill(status: str) -> str:
         if status == RUNNING:
-            return "[b #2ea043]\u25cf RUN[/]"
+            return "[b #2ea043]\u25cf[/]"
         if status == DONE:
-            return f"[{CURSOR_MUTED}]\u2713 DONE[/]"
-        return f"[{DIM}]idle[/]"
+            return f"[{DIM}]\u2713[/]"
+        return f"[{DIM}]\u00b7[/]"
 
     def _build(self, agent: AgentInfo, now: float) -> str:
-        # The pane is narrow, so every line starts at the left edge and we
-        # lean on the card border for grouping rather than indentation.
         width = self.card_width
+        age = humanize_age(agent.updated, now)
+        title = escape(truncate(agent.task, max(16, width - 10)))
         pill = self._pill(agent.status)
-        # "● RUN " costs 6 columns on the title line.
-        title = escape(truncate(agent.task, max(12, width * 2 - 8)))
-        lines = [f"{pill} [#e4e4e4]{title}[/]"]
 
-        if agent.detail:
-            lines.append(f"[{CURSOR_MUTED}]{escape(truncate(agent.detail, width))}[/]")
+        # Finished / idle: one quiet line.
+        if agent.status != RUNNING:
+            return f"{pill} [{CURSOR_MUTED}]{title}[/] [{DIM}]{age}[/]"
 
-        window = _todo_window(agent.todos)
-        for todo in window:
-            if todo.status == "completed":
-                style = CURSOR_MUTED
-            elif todo.status == "in_progress":
-                style = CURSOR_ACCENT
-            else:
-                style = DIM
-            text = escape(truncate(todo.content, max(8, width - 2)))
-            lines.append(f"[{style}]{todo.glyph} {text}[/]")
+        # Running: title, then at most one detail + active todos.
+        lines = [f"{pill} [b #e4e4e4]{title}[/]"]
 
-        extra = len(agent.todos) - len(window)
-        if extra > 0:
-            lines.append(f"[{DIM}]  +{extra} more[/]")
+        detail = (agent.detail or "").strip()
+        if detail and not detail.startswith("finished"):
+            lines.append(f"  [{CURSOR_MUTED}]{escape(truncate(detail, width - 2))}[/]")
 
-        meta = f"{agent_handle(agent)} \u00b7 {humanize_age(agent.updated, now)}"
-        lines.append(f"[{DIM}]{escape(truncate(meta, width))}[/]")
+        active = [t for t in agent.todos if t.status == "in_progress"]
+        pending = [t for t in agent.todos if t.status == "pending"]
+        show = active[:2] or pending[:2]
+        for todo in show:
+            style = CURSOR_ACCENT if todo.status == "in_progress" else DIM
+            text = escape(truncate(todo.content, max(8, width - 4)))
+            lines.append(f"  [{style}]{todo.glyph} {text}[/]")
+
+        meta_bits: list[str] = []
+        if self.show_device and agent.device:
+            meta_bits.append(agent.device)
+        if agent.project and agent.project != "~":
+            meta_bits.append(agent.project)
+        meta_bits.append(short_id(agent.agent_id, 6))
+        meta_bits.append(age)
+        lines.append(f"  [{DIM}]{escape(truncate(' \u00b7 '.join(meta_bits), width - 2))}[/]")
         return "\n".join(lines)
 
-
-def _todo_window(todos: list[TodoItem], size: int = 4) -> list[TodoItem]:
-    """Show a window around the active item rather than always the first few."""
-    if len(todos) <= size:
-        return todos
-    active = next(
-        (i for i, t in enumerate(todos) if t.status == "in_progress"),
-        None,
-    )
-    if active is None:
-        active = next(
-            (i for i, t in enumerate(todos) if t.status != "completed"), 0
-        )
-    start = max(0, min(active - 1, len(todos) - size))
-    return todos[start : start + size]
 
 
 class ShellRow(Static):
@@ -166,20 +162,17 @@ class ShellRow(Static):
 
     def _build(self, shell: ShellInfo, now: float) -> str:
         width = self.card_width
-        command = escape(truncate(shell.command, max(12, width * 2 - 4)))
-        meta_bits = [b for b in (shell.device, _shorten_path(shell.cwd)) if b]
-        meta = escape(truncate(" \u00b7 ".join(meta_bits), max(10, width - 12)))
-        # A file can be left claiming "running" long after the shell died.
+        command = escape(truncate(shell.command, max(12, width - 8)))
+        age = humanize_age(shell.updated, now)
         state = (shell.status or "").lower()
         fresh = (now - shell.updated) < 300
-        marker = "[#2ea043]\u25cf[/] " if state == "running" and fresh else ""
-        line = f"[{CURSOR_ACCENT}]$[/] {marker}[#d4d4d4]{command}[/]"
-        return f"{line}\n  [{DIM}]{meta} \u00b7 {humanize_age(shell.updated, now)}[/]"
+        marker = "[#2ea043]\u25cf[/]" if state == "running" and fresh else f"[{DIM}]$[/]"
+        return f"{marker} [#c8c8c8]{command}[/] [{DIM}]{age}[/]"
 
 
 class SectionLabel(Static):
     def __init__(self, text: str) -> None:
-        super().__init__(f"[{CURSOR_MUTED}]{escape(text)}[/]", classes="section-label")
+        super().__init__(f"[{DIM}]{escape(text)}[/]", classes="section-label")
 
 
 class EmptyRow(Static):
@@ -358,7 +351,7 @@ class YtTuiApp(App[None]):
     #cursor-header {
         height: 1;
         background: #252526;
-        color: #cccccc;
+        color: #9d9d9d;
         padding: 0 1;
         text-style: bold;
     }
@@ -374,53 +367,55 @@ class YtTuiApp(App[None]):
     }
 
     #cursor-body:focus {
-        border-left: tall #0078d4;
+        border-left: tall #3a3a3a;
         padding: 0 1 0 0;
     }
 
     .section-label {
         width: 1fr;
         height: 1;
-        text-style: bold;
         margin-top: 1;
+        color: #6f6f6f;
     }
 
-    .agent-card {
+    .agent-row {
         width: 1fr;
         height: auto;
-        background: #252526;
-        border-left: thick #3f3f46;
+        background: transparent;
+        padding: 0;
+        margin: 0;
+    }
+
+    .agent-row.agent-running {
+        background: #1a2228;
         padding: 0 1;
-        margin-bottom: 1;
-    }
-
-    .agent-card.agent-running {
-        background: #202b33;
-        border-left: thick #0078d4;
-    }
-
-    .agent-card.agent-done {
-        background: #232324;
-        border-left: thick #3f3f46;
+        margin: 0 0 1 0;
+        border-left: tall #2ea043;
     }
 
     .shell-row {
         width: 1fr;
         height: auto;
-        background: #1b1b1b;
-        border-left: thick #2d2d30;
-        padding: 0 1;
-        margin-bottom: 1;
+        background: transparent;
+        padding: 0;
+        margin: 0;
     }
 
     .empty-row {
         width: 1fr;
         height: 1;
-        padding: 0 1;
+        padding: 0;
+    }
+
+    .peer-label {
+        width: 1fr;
+        height: 1;
+        padding: 0;
+        margin-top: 0;
     }
 
     #cursor-meta {
-        height: auto;
+        height: 1;
         dock: bottom;
         background: #252526;
         color: #6f6f6f;
@@ -460,7 +455,7 @@ class YtTuiApp(App[None]):
                 yield VerticalScroll(id="chat-log")
             with Vertical(id="cursor-pane"):
                 yield Static(
-                    "[b #cccccc]CURSOR ACTIVITY[/]", id="cursor-header", markup=True
+                    "[#9d9d9d]CURSOR[/]", id="cursor-header", markup=True
                 )
                 yield VerticalScroll(id="cursor-body")
                 yield Static("", id="cursor-meta", markup=True)
@@ -670,57 +665,65 @@ class YtTuiApp(App[None]):
 
         now = time.time()
         body = self.query_one("#cursor-body", VerticalScroll)
-        # Cards sit inside a left border plus one column of padding each side.
-        width = max(20, body.content_size.width - 3)
+        width = max(20, body.content_size.width - 2)
         widgets: list[Static] = []
 
+        def _sorted(agents: list[AgentInfo], limit: int) -> list[AgentInfo]:
+            # Running first, then newest. Cap done rows so the pane stays airy.
+            ordered = sorted(
+                agents, key=lambda a: (a.status != RUNNING, -a.updated)
+            )
+            running = [a for a in ordered if a.status == RUNNING]
+            rest = [a for a in ordered if a.status != RUNNING]
+            return (running + rest)[:limit]
+
         widgets.append(SectionLabel("THIS MAC"))
-        if snapshot.local:
-            widgets.extend(AgentCard(a, now, width) for a in snapshot.local[:6])
+        local = _sorted(snapshot.local, 5)
+        if local:
+            widgets.extend(AgentCard(a, now, width) for a in local)
         else:
-            widgets.append(EmptyRow("no local agents"))
+            widgets.append(EmptyRow("—"))
 
         widgets.append(SectionLabel("OTHER DEVICES"))
         if snapshot.peers:
             for group in snapshot.peers:
                 widgets.append(
                     Static(
-                        f"[{CURSOR_ACCENT}]{escape(group.name)}[/] "
-                        f"[{DIM}]{humanize_age(group.updated, now)}[/]",
-                        classes="empty-row",
+                        f"[{CURSOR_MUTED}]{escape(group.name)}[/]",
+                        classes="peer-label",
                         markup=True,
                     )
                 )
-                if group.agents:
-                    widgets.extend(AgentCard(a, now, width) for a in group.agents[:4])
+                peer_agents = _sorted(group.agents, 4)
+                if peer_agents:
+                    widgets.extend(
+                        AgentCard(a, now, width, show_device=False)
+                        for a in peer_agents
+                    )
                 else:
-                    widgets.append(EmptyRow("  idle"))
+                    widgets.append(EmptyRow("—"))
         else:
-            widgets.append(EmptyRow("none"))
+            widgets.append(EmptyRow("—"))
 
         widgets.append(SectionLabel("CLOUD"))
-        if snapshot.cloud:
-            widgets.extend(AgentCard(a, now, width) for a in snapshot.cloud[:5])
+        cloud = _sorted(snapshot.cloud, 3)
+        if cloud:
+            widgets.extend(AgentCard(a, now, width) for a in cloud)
         else:
-            widgets.append(EmptyRow("none"))
+            widgets.append(EmptyRow("—"))
 
         widgets.append(SectionLabel("SHELLS"))
         if snapshot.shells:
-            widgets.extend(ShellRow(s, now, width) for s in snapshot.shells[:5])
+            widgets.extend(ShellRow(s, now, width) for s in snapshot.shells[:3])
         else:
-            widgets.append(EmptyRow("none"))
+            widgets.append(EmptyRow("—"))
 
         body.remove_children()
         body.mount_all(widgets)
 
         meta = self.query_one("#cursor-meta", Static)
-        counts = f"{snapshot.running_count} running \u00b7 {snapshot.done_count} done"
-        if snapshot.cloud_note:
-            counts = f"{counts} \u00b7 cloud: {snapshot.cloud_note}"
-        sync = _shorten_path(snapshot.sync_path, width - 6)
         meta.update(
-            f"[{DIM}]{escape(truncate(counts, width + 1))}\n"
-            f"sync: {escape(sync) if sync else '(none)'}[/]"
+            f"[{DIM}]{snapshot.running_count} run  {snapshot.done_count} done[/]"
         )
 
     @staticmethod
