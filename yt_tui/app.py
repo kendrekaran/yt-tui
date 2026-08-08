@@ -32,8 +32,8 @@ from .cursor_status import (
 from .utils import humanize_age, parse_video_id, short_id, truncate
 
 MAX_CHAT_ROWS = 300
-CURSOR_REFRESH_SECONDS = 1.5
-PUBLISH_EVERY_SECONDS = 5.0
+CURSOR_REFRESH_SECONDS = 1.0
+PUBLISH_EVERY_SECONDS = 2.0
 
 # Muted grays and the YouTube/Cursor accents used in inline markup.
 DIM = "#6f6f6f"

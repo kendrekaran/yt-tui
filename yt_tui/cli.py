@@ -39,8 +39,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--interval",
         type=float,
-        default=5.0,
-        help="seconds between --sync --loop publishes (default: 5)",
+        default=2.0,
+        help="seconds between --sync --loop publishes (default: 2)",
     )
     parser.add_argument(
         "--no-publish",

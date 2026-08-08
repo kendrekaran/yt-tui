@@ -30,11 +30,16 @@ ICLOUD_DIR = (
 FALLBACK_DIR = Path.home() / ".yt-tui" / "devices"
 
 STALE_SECONDS = 15 * 60
-PUBLISH_INTERVAL = 5.0
+PUBLISH_INTERVAL = 2.0
+# Push immediately when agent state changes; otherwise heartbeat so peers
+# do not look stale while nothing is happening.
+PUBLISH_HEARTBEAT_SECONDS = 8.0
 
 MACHINE_ID_PATH = Path.home() / ".yt-tui" / "machine-id"
 
 _machine_id: str | None = None
+_last_publish_fingerprint: str | None = None
+_last_gist_publish = 0.0
 
 
 def machine_id() -> str:
@@ -125,8 +130,51 @@ def ensure_dir() -> Path | None:
         return None
 
 
+def _payload_fingerprint(payload: dict[str, Any]) -> str:
+    """Hash of the meaningful bits (ignore moving timestamps)."""
+    agents = []
+    for item in payload.get("agents") or []:
+        if not isinstance(item, dict):
+            continue
+        agents.append(
+            {
+                "id": item.get("agent_id"),
+                "status": item.get("status"),
+                "task": item.get("task"),
+                "detail": item.get("detail"),
+                "todos": [
+                    (t.get("content"), t.get("status"))
+                    for t in (item.get("todos") or [])
+                    if isinstance(t, dict)
+                ],
+            }
+        )
+    shells = []
+    for item in payload.get("shells") or []:
+        if not isinstance(item, dict):
+            continue
+        shells.append(
+            {
+                "command": item.get("command"),
+                "status": item.get("status"),
+            }
+        )
+    slim = {
+        "device": payload.get("device"),
+        "machine_id": payload.get("machine_id"),
+        "agents": agents,
+        "shells": shells,
+    }
+    return hashlib.md5(
+        json.dumps(slim, sort_keys=True, ensure_ascii=False).encode("utf-8"),
+        usedforsecurity=False,
+    ).hexdigest()
+
+
 def publish(agents: list[AgentInfo] | None = None, shells: list[ShellInfo] | None = None) -> Path | None:
     """Write this machine's activity locally and to the shared GitHub gist."""
+    global _last_publish_fingerprint, _last_gist_publish
+
     try:
         agents = local_agents() if agents is None else agents
         shells = local_shells() if shells is None else shells
@@ -163,16 +211,23 @@ def publish(agents: list[AgentInfo] | None = None, shells: list[ShellInfo] | Non
         except OSError:
             path = None
 
-    # Gist is the reliable cross-Mac channel; local folder is a bonus.
+    fingerprint = _payload_fingerprint(payload)
+    now = time.time()
+    changed = fingerprint != _last_publish_fingerprint
+    due = (now - _last_gist_publish) >= PUBLISH_HEARTBEAT_SECONDS
     gist_ok = False
-    try:
-        gist_ok = gist_sync.publish_to_gist(f"{name}.json", payload)
-    except Exception:
-        gist_ok = False
+    if changed or due:
+        try:
+            gist_ok = gist_sync.publish_to_gist(f"{name}.json", payload)
+        except Exception:
+            gist_ok = False
+        if gist_ok:
+            _last_publish_fingerprint = fingerprint
+            _last_gist_publish = now
 
     if path is not None:
         return path
-    if gist_ok:
+    if gist_ok or (_last_gist_publish and not changed and not due):
         return Path(f"gist:{name}.json")
     return None
 
